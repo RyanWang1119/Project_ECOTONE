@@ -96,7 +96,7 @@ Null Hypothesis: Series is non-stationary or series has a unit root.
 
 Alternate Hypothesis: Series is stationary or series has no unit root.
 
-Ljung–Box test:
+Box-Pierce test:
 
 Null Hypothesis: The data are independently distributed.
 
@@ -146,8 +146,8 @@ hist(residual_nbf_hour_model_auto,density=20,breaks=20,col="blue",xlab="",main =
 acf2(residual_nbf_hour_model_auto) 
 # ACF plot / PACF plot show almost no significant spike.
 
+Box.test(residual_nbf_hour_model_auto, type = c("Box-Pierce"))
 Box.test(residual_nbf_hour_model_auto, lag = 24, type = c("Box-Pierce"))
-Box.test(residual_nbf_hour_model_auto, lag = 24, type = c("Ljung-Box"))
 # Both the Box-Pierce test and the Ljung-Box test give p-vlaues greater than 0.05. I fail to reject the null
  
 # Thus, I conclude that the residual of this model is a Guassian white noise.
@@ -155,8 +155,7 @@ summary(nbf_hour_model_auto)
 ```
 
 I first try the model given by the auto.arima() function.
-ACF and PACF plots show almost no significant spike and both the Box-Pierce test and the Ljung-Box test give p-values greater than 0.05. I fail to reject the null and conclude that the residuals are identically independently distributed. Thus, the residual of this model is a Guassian white noise.
-It means that the model is already good enough since there is nothing left over that can be explained.
+ACF and PACF plots show almost no significant spike and both the Box-Pierce tests give p-values greater than 0.05. I fail to reject the null and conclude that the residuals are identically independently distributed. 
 
 ```{r}
 nbf_hour_model_1 <-arima(nbf_hour_ts_train, order=c(3,0,1))
@@ -168,16 +167,14 @@ hist(residual_nbf_hour_model_1,density=20,breaks=20,col="blue",xlab="",main = "H
 
 # 2. Correlation test
 acf2(residual_nbf_hour_model_1)
+Box.test(residual_nbf_hour_model_1, type = c("Box-Pierce"))
 Box.test(residual_nbf_hour_model_1, lag = 24, type = c("Box-Pierce"))
-Box.test(residual_nbf_hour_model_1, lag = 24, type = c("Ljung-Box"))
 # Both the Box-Pierce test and the Ljung-Box test give p-vlaues greater than 0.05. I fail to reject the null 
  
-# Thus, I conclude that the residual of this model is a Guassian white noise.
-summary(nbf_hour_model_1)
 ```
 
 Then I try the model without the seasonal component.
-ACF and PACF plots show almost no significant spike and both the Box-Pierce test and the Ljung-Box test give p-values greater than 0.05. I fail to reject the null and conclude that the residuals are identically independently distributed. Thus, the residual of this model is a Guassian white noise.
+ACF and PACF plots show almost no significant spike and both the Box-Pierce tests and give p-values greater than 0.05. I fail to reject the null and conclude that the residuals are identically independently distributed. 
 
 ```{r}
 nbf_hour_model_2 <-arima(nbf_hour_ts_train, order=c(1,0,3))
@@ -193,12 +190,10 @@ Box.test(residual_nbf_hour_model_2, lag = 24, type = c("Box-Pierce"))
 Box.test(residual_nbf_hour_model_2, lag = 24, type = c("Ljung-Box"))
 # Both the Box-Pierce test and the Ljung-Box test give p-vlaues greater than 0.05. I fail to reject the null 
  
-# Thus, I conclude that the residual of this model is a Guassian white noise.
-summary(nbf_hour_model_2)
 ```
 
 Another model with different parameters.
-ACF and PACF plots show almost no significant spike and both the Box-Pierce test and the Ljung-Box test give p-values greater than 0.05. I fail to reject the null and conclude that the residuals are identically independently distributed. Thus, the residual of this model is a Guassian white noise.
+ACF and PACF plots show almost no significant spike and both the Box-Pierce tests give p-values greater than 0.05. I fail to reject the null and conclude that the residuals are identically independently distributed. 
 
 ```{r}
 ### Summary of the created model.
@@ -208,15 +203,32 @@ result$BIC <- sapply(models, BIC)
 kable(result, digits = 2, align = "c")
 ```
 
+The three models are almost equivalently good based on their AIC and BIC values.
+
+```{r}
+summary(nbf_hour_model_1)
+summary(nbf_hour_model_2)
+```
+Model 1: $ARMA(3,0,1)$, mathematically, it is the following:
+
+$(1 - 0.7242B + 0.0376B^2 - 0.0972B^3)Y_{t} = (1 -0.6091B)\epsilon_{t}$
+
+$Y_t = - 1.270 + 0.7242Y_{t-1} - 0.0376Y_{t-2} + 0.0972Y_{t-3} + \epsilon_{t} - 0.6091\epsilon_{t-1}$
+
+Model 2: $ARMA(1,0,3)$, mathematically, it is the following:
+
+$(1 - 0.7885B)Y_{t} = (1 -0.6762B - 0.0463B^2 + 0.0979B^3)\epsilon_{t}$
+
+$Y_t = - 1.2704 + 0.7885Y_{t-1} + \epsilon_{t} - 0.6762\epsilon_{t-1} - 0.0463\epsilon_{t-2} + 0.0979\epsilon_{t-3}$
 
 ```{r}
 # Plot the fitted values with raw data
 nbf_hour_fitted_1 <- nbf_hour_ts_train - residual_nbf_hour_model_1
-ts.plot(nbf_hour_ts_train, main = 'model B, fitted vs actual')
+ts.plot(nbf_hour_ts_train, main = 'model 1, fitted vs actual')
 points(nbf_hour_fitted_1, type = "l", col = 2, lty = 2)
 
 nbf_hour_fitted_2 <- nbf_hour_ts_train - residual_nbf_hour_model_2
-ts.plot(nbf_hour_ts_train, main = 'model C, fitted vs actual')
+ts.plot(nbf_hour_ts_train, main = 'model 2, fitted vs actual')
 points(nbf_hour_fitted_2, type = "l", col = 2, lty = 2)
 ```
 

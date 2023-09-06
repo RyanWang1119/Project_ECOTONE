@@ -1677,7 +1677,7 @@ so that the modelling is meaningful, I perform the Ljung–Box test.</p>
 root.</p>
 <p>Alternate Hypothesis: Series is stationary or series has no unit
 root.</p>
-<p>Ljung–Box test:</p>
+<p>Box-Pierce test:</p>
 <p>Null Hypothesis: The data are independently distributed.</p>
 <p>Alternate Hypothesis:The data are not independently distributed; they
 exhibit serial correlation.</p>
@@ -1783,18 +1783,18 @@ acf2(residual_nbf_hour_model_auto) </code></pre>
 ## PACF  0.04  0.00  0.03  0.02  0.03 -0.02 -0.02 -0.04     0  0.01  0.06</code></pre>
 <pre class="r"><code># ACF plot / PACF plot show almost no significant spike.
 
-Box.test(residual_nbf_hour_model_auto, lag = 24, type = c(&quot;Box-Pierce&quot;))</code></pre>
+Box.test(residual_nbf_hour_model_auto, type = c(&quot;Box-Pierce&quot;))</code></pre>
+<pre><code>## 
+##  Box-Pierce test
+## 
+## data:  residual_nbf_hour_model_auto
+## X-squared = 0.00035981, df = 1, p-value = 0.9849</code></pre>
+<pre class="r"><code>Box.test(residual_nbf_hour_model_auto, lag = 24, type = c(&quot;Box-Pierce&quot;))</code></pre>
 <pre><code>## 
 ##  Box-Pierce test
 ## 
 ## data:  residual_nbf_hour_model_auto
 ## X-squared = 15.168, df = 24, p-value = 0.9157</code></pre>
-<pre class="r"><code>Box.test(residual_nbf_hour_model_auto, lag = 24, type = c(&quot;Ljung-Box&quot;))</code></pre>
-<pre><code>## 
-##  Box-Ljung test
-## 
-## data:  residual_nbf_hour_model_auto
-## X-squared = 15.534, df = 24, p-value = 0.9042</code></pre>
 <pre class="r"><code># Both the Box-Pierce test and the Ljung-Box test give p-vlaues greater than 0.05. I fail to reject the null
  
 # Thus, I conclude that the residual of this model is a Guassian white noise.
@@ -1817,12 +1817,10 @@ summary(nbf_hour_model_auto)</code></pre>
 ##                       ACF1
 ## Training set -0.0008440965</code></pre>
 <p>I first try the model given by the auto.arima() function. ACF and
-PACF plots show almost no significant spike and both the Box-Pierce test
-and the Ljung-Box test give p-values greater than 0.05. I fail to reject
-the null and conclude that the residuals are identically independently
-distributed. Thus, the residual of this model is a Guassian white noise.
-It means that the model is already good enough since there is nothing
-left over that can be explained.</p>
+PACF plots show almost no significant spike and both the Box-Pierce
+tests give p-values greater than 0.05. I fail to reject the null and
+conclude that the residuals are identically independently
+distributed.</p>
 <pre class="r"><code>nbf_hour_model_1 &lt;-arima(nbf_hour_ts_train, order=c(3,0,1))
 
 #### Model diagnosis - auto.arima ####
@@ -1857,44 +1855,23 @@ acf2(residual_nbf_hour_model_1)</code></pre>
 ##      [,86] [,87] [,88] [,89] [,90] [,91] [,92] [,93] [,94] [,95] [,96]
 ## ACF   0.02  0.01  0.04  0.03  0.03 -0.02 -0.01 -0.04     0  0.02  0.04
 ## PACF  0.04  0.00  0.03  0.02  0.03 -0.02 -0.02 -0.04     0  0.01  0.05</code></pre>
+<pre class="r"><code>Box.test(residual_nbf_hour_model_1, type = c(&quot;Box-Pierce&quot;))</code></pre>
+<pre><code>## 
+##  Box-Pierce test
+## 
+## data:  residual_nbf_hour_model_1
+## X-squared = 0.0072911, df = 1, p-value = 0.932</code></pre>
 <pre class="r"><code>Box.test(residual_nbf_hour_model_1, lag = 24, type = c(&quot;Box-Pierce&quot;))</code></pre>
 <pre><code>## 
 ##  Box-Pierce test
 ## 
 ## data:  residual_nbf_hour_model_1
 ## X-squared = 12.563, df = 24, p-value = 0.9728</code></pre>
-<pre class="r"><code>Box.test(residual_nbf_hour_model_1, lag = 24, type = c(&quot;Ljung-Box&quot;))</code></pre>
-<pre><code>## 
-##  Box-Ljung test
-## 
-## data:  residual_nbf_hour_model_1
-## X-squared = 12.906, df = 24, p-value = 0.9676</code></pre>
-<pre class="r"><code># Both the Box-Pierce test and the Ljung-Box test give p-vlaues greater than 0.05. I fail to reject the null 
- 
-# Thus, I conclude that the residual of this model is a Guassian white noise.
-summary(nbf_hour_model_1)</code></pre>
-<pre><code>## 
-## Call:
-## arima(x = nbf_hour_ts_train, order = c(3, 0, 1))
-## 
-## Coefficients:
-##          ar1      ar2     ar3      ma1  intercept
-##       0.7242  -0.0376  0.0972  -0.6091     -1.270
-## s.e.  0.1472   0.0578  0.0522   0.1435      0.049
-## 
-## sigma^2 estimated as 0.3749:  log likelihood = -468.89,  aic = 949.79
-## 
-## Training set error measures:
-##                        ME      RMSE       MAE     MPE    MAPE     MASE
-## Training set -0.002276735 0.6122761 0.3812326 53.5121 53.5121 1.120177
-##                      ACF1
-## Training set -0.003799705</code></pre>
+<pre class="r"><code># Both the Box-Pierce test and the Ljung-Box test give p-vlaues greater than 0.05. I fail to reject the null </code></pre>
 <p>Then I try the model without the seasonal component. ACF and PACF
-plots show almost no significant spike and both the Box-Pierce test and
-the Ljung-Box test give p-values greater than 0.05. I fail to reject the
-null and conclude that the residuals are identically independently
-distributed. Thus, the residual of this model is a Guassian white
-noise.</p>
+plots show almost no significant spike and both the Box-Pierce tests and
+give p-values greater than 0.05. I fail to reject the null and conclude
+that the residuals are identically independently distributed.</p>
 <pre class="r"><code>nbf_hour_model_2 &lt;-arima(nbf_hour_ts_train, order=c(1,0,3))
 
 #### Model diagnosis - auto.arima ####
@@ -1941,32 +1918,11 @@ acf2(residual_nbf_hour_model_2) </code></pre>
 ## 
 ## data:  residual_nbf_hour_model_2
 ## X-squared = 12.595, df = 24, p-value = 0.9723</code></pre>
-<pre class="r"><code># Both the Box-Pierce test and the Ljung-Box test give p-vlaues greater than 0.05. I fail to reject the null 
- 
-# Thus, I conclude that the residual of this model is a Guassian white noise.
-summary(nbf_hour_model_2)</code></pre>
-<pre><code>## 
-## Call:
-## arima(x = nbf_hour_ts_train, order = c(1, 0, 3))
-## 
-## Coefficients:
-##          ar1      ma1      ma2     ma3  intercept
-##       0.7885  -0.6762  -0.0463  0.0979    -1.2704
-## s.e.  0.0950   0.1026   0.0548  0.0510     0.0481
-## 
-## sigma^2 estimated as 0.3746:  log likelihood = -468.7,  aic = 949.41
-## 
-## Training set error measures:
-##                        ME      RMSE       MAE      MPE     MAPE     MASE
-## Training set -0.002102334 0.6120436 0.3806724 53.43533 53.43533 1.118531
-##                      ACF1
-## Training set -0.001095363</code></pre>
+<pre class="r"><code># Both the Box-Pierce test and the Ljung-Box test give p-vlaues greater than 0.05. I fail to reject the null </code></pre>
 <p>Another model with different parameters. ACF and PACF plots show
-almost no significant spike and both the Box-Pierce test and the
-Ljung-Box test give p-values greater than 0.05. I fail to reject the
-null and conclude that the residuals are identically independently
-distributed. Thus, the residual of this model is a Guassian white
-noise.</p>
+almost no significant spike and both the Box-Pierce tests give p-values
+greater than 0.05. I fail to reject the null and conclude that the
+residuals are identically independently distributed.</p>
 <pre class="r"><code>### Summary of the created model.
 result &lt;- AIC(nbf_hour_model_auto, nbf_hour_model_1, nbf_hour_model_2) 
 models &lt;- list(nbf_hour_model_auto, nbf_hour_model_1, nbf_hour_model_2) 
@@ -2002,6 +1958,56 @@ kable(result, digits = 2, align = &quot;c&quot;)</code></pre>
 </tr>
 </tbody>
 </table>
+<p>The three models are almost equivalently good based on their AIC and
+BIC values.</p>
+<pre class="r"><code>summary(nbf_hour_model_1)</code></pre>
+<pre><code>## 
+## Call:
+## arima(x = nbf_hour_ts_train, order = c(3, 0, 1))
+## 
+## Coefficients:
+##          ar1      ar2     ar3      ma1  intercept
+##       0.7242  -0.0376  0.0972  -0.6091     -1.270
+## s.e.  0.1472   0.0578  0.0522   0.1435      0.049
+## 
+## sigma^2 estimated as 0.3749:  log likelihood = -468.89,  aic = 949.79
+## 
+## Training set error measures:
+##                        ME      RMSE       MAE     MPE    MAPE     MASE
+## Training set -0.002276735 0.6122761 0.3812326 53.5121 53.5121 1.120177
+##                      ACF1
+## Training set -0.003799705</code></pre>
+<pre class="r"><code>summary(nbf_hour_model_2)</code></pre>
+<pre><code>## 
+## Call:
+## arima(x = nbf_hour_ts_train, order = c(1, 0, 3))
+## 
+## Coefficients:
+##          ar1      ma1      ma2     ma3  intercept
+##       0.7885  -0.6762  -0.0463  0.0979    -1.2704
+## s.e.  0.0950   0.1026   0.0548  0.0510     0.0481
+## 
+## sigma^2 estimated as 0.3746:  log likelihood = -468.7,  aic = 949.41
+## 
+## Training set error measures:
+##                        ME      RMSE       MAE      MPE     MAPE     MASE
+## Training set -0.002102334 0.6120436 0.3806724 53.43533 53.43533 1.118531
+##                      ACF1
+## Training set -0.001095363</code></pre>
+<p>Model 1: <span class="math inline">\(ARMA(3,0,1)\)</span>,
+mathematically, it is the following:</p>
+<p><span class="math inline">\((1 - 0.7242B + 0.0376B^2 -
+0.0972B^3)Y_{t} = (1 -0.6091B)\epsilon_{t}\)</span></p>
+<p><span class="math inline">\(Y_t = - 1.270 + 0.7242Y_{t-1} -
+0.0376Y_{t-2} + 0.0972Y_{t-3} + \epsilon_{t} -
+0.6091\epsilon_{t-1}\)</span></p>
+<p>Model 2: <span class="math inline">\(ARMA(1,0,3)\)</span>,
+mathematically, it is the following:</p>
+<p><span class="math inline">\((1 - 0.7885B)Y_{t} = (1 -0.6762B -
+0.0463B^2 + 0.0979B^3)\epsilon_{t}\)</span></p>
+<p><span class="math inline">\(Y_t = - 1.2704 + 0.7885Y_{t-1} +
+\epsilon_{t} - 0.6762\epsilon_{t-1} - 0.0463\epsilon_{t-2} +
+0.0979\epsilon_{t-3}\)</span></p>
 <pre class="r"><code># Plot the fitted values with raw data
 nbf_hour_fitted_1 &lt;- nbf_hour_ts_train - residual_nbf_hour_model_1
 ts.plot(nbf_hour_ts_train, main = &#39;model B, fitted vs actual&#39;)

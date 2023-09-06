@@ -133,8 +133,6 @@ Box.test(residual_bc_hour_model_1, type = c("Box-Pierce"))
 Box.test(residual_bc_hour_model_1, lag = 24, type = c("Box-Pierce"))
 # Both the Box-Pierce test and the Ljung-Box test give p-vlaues greater than 0.05. I fail to reject the null 
  
-# Thus, I conclude that the residual of this model is a Guassian white noise.
-summary(bc_hour_model_1)
 ```
 
 Then I try the model with a higher order of parameters.
@@ -157,8 +155,6 @@ Box.test(residual_bc_hour_model_2, type = c("Box-Pierce"))
 Box.test(residual_bc_hour_model_2, lag = 24, type = c("Box-Pierce"))
 # Both the Box-Pierce test and the Ljung-Box test give p-vlaues greater than 0.05. I fail to reject the null 
  
-# Thus, I conclude that the residual of this model is a Guassian white noise.
-summary(bc_hour_model_2)
 ```
 
 Another model with different parameters.
@@ -175,15 +171,51 @@ result$BIC <- sapply(models, BIC)
 kable(result, digits = 2, align = "c")
 ```
 
+bc_hour_model_1 is the best based on the ACF/PACF plots and the Box-Pierce tests.
+
+bc_hour_model_2 is the best based on the AIC and BIC values.
+
+```{r}
+summary(bc_hour_model_1)
+summary(bc_hour_model_2)
+```
+
+Mathematically, model 1 is the following:
+
+$SARMA(2,0,2)\times(1,0,1)_{24}$
+
+$\Theta(B)_{P,s}\theta(B)Y_t = \Phi(B)_{Q,s}\phi(B)\epsilon_{t}$
+
+$\phi(B) = (1 - 1.3873B + 0.8905B^2)$
+
+$\theta(B) = (1 -1.4071B + 0.9446B^2)$
+
+$\Phi(B) = 1 + 1.1554B^{24} + 0.4392B^{48})$
+
+$\Theta(B) = (1 + 0.2188B^{24} -0.5933B^{48} - 0.3165B^{72})$.
+
+Mathematically, model 2 is the following:
+
+$SARMA(2,0,2)\times(1,0,1)_{24}$
+
+$\Theta(B)_{P,s}\theta(B)Y_t = \Phi(B)_{Q,s}\phi(B)\epsilon_{t}$
+
+$\phi(B) = (1 + 0.2772B - 0.0065B^2)$
+
+$\theta(B) = (1 - 0.2222B + 0.0813B^2)$
+
+$\Phi(B) = 1 + 0.0589B^{24})$
+
+$\Theta(B) = (1 -0.8830B^{24})$.
 
 ```{r}
 # Plot the fitted values with raw data
 bc_hour_fitted_1 <- diff_bc_hour_ts_train - residual_bc_hour_model_1
-ts.plot(diff_bc_hour_ts_train, main = 'model B, fitted vs actual')
+ts.plot(diff_bc_hour_ts_train, main = 'model 1, fitted vs actual')
 points(bc_hour_fitted_1, type = "l", col = 2, lty = 2)
 
 bc_hour_fitted_2 <- diff_bc_hour_ts_train - residual_bc_hour_model_2
-ts.plot(diff_bc_hour_ts_train, main = 'model C, fitted vs actual')
+ts.plot(diff_bc_hour_ts_train, main = 'model 2, fitted vs actual')
 points(bc_hour_fitted_2, type = "l", col = 2, lty = 2)
 ```
 
