@@ -1,0 +1,156 @@
+---
+title: "4"
+author: "Ryan Wang"
+date: "2023-08-02"
+output:
+    html_document:
+      toc: true
+      toc_float: true
+      code_folding: show
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE,
+                      warning = FALSE)
+
+library(tidyverse)
+library(tidymodels)
+library(dplyr)
+library(here)
+library(zoo)
+library(tseries)
+library(stats)
+library(astsa)
+library(forecast)
+library(car)
+library(MASS)
+library(finalfit) 
+library(ggplot2)
+library(forecast)
+library(lubridate)
+library(astsa)
+library(dynlm)
+library(knitr)
+library(nlme)
+
+nbf_hour_complete <- read.csv(here("data", "nbf_hour_complete.csv"))
+bc_hour_complete <- read.csv(here("data", "bc_hour_complete.csv"))
+```
+
+```{r}
+# convert the data into time series form
+nbf_x <- strptime("06/18/2022 20:00","%m/%d/%Y %H:%M")+3600*1:nrow(nbf_hour_complete) 
+bc_x <- strptime("07/31/2022 06:00","%m/%d/%Y %H:%M")+3600*1:nrow(bc_hour_complete)
+nbf_power <- zoo(nbf_hour_complete$number_of_objects,nbf_x)  
+bc_power <- zoo(bc_hour_complete$number_of_objects,bc_x)
+
+
+par(mar = c(6, 4.1, 4.1, 2.1)) 
+plot(nbf_power,col="red",ylim=c(0,400),xlab="Time",ylab="Count",main = 'Animal Counts',
+     xlim=c(as.POSIXct(strptime("06/18/2022 20:00","%m/%d/%Y %H:%M")),
+            as.POSIXct(strptime("09/17/2022 03:00","%m/%d/%Y %H:%M"))))
+lines(bc_power,col="green")
+legend("bottom", inset = c(0, -0.25),
+       xpd = TRUE,
+       legend = c("North Beach Fort","Big Cojo"),
+       col = c("red","green"),
+       lty=1,
+       horiz=TRUE, 
+       cex=0.6,
+       xjust=0.5)
+```
+
+```{r}
+# classify the columns by date/week/season/hour in one day
+nbf_hour_complete$day <-as.Date(mdy_hm(nbf_hour_complete$time))
+nbf_hour_complete$week <- week(nbf_hour_complete$day)
+nbf_hour_complete$month <- month(nbf_hour_complete$day)
+nbf_hour_complete$hour <- hour(mdy_hm(nbf_hour_complete$time))
+
+bc_hour_complete$day <-as.Date(mdy_hm(bc_hour_complete$time))
+bc_hour_complete$week <- week(bc_hour_complete$day)
+bc_hour_complete$month <- month(bc_hour_complete$day)
+bc_hour_complete$hour <- hour(mdy_hm(bc_hour_complete$time))
+
+
+nbf_day_sum <- aggregate(number_of_objects~day,data = nbf_hour_complete,FUN = sum) 
+nbf_week_sum <- aggregate(number_of_objects~week,data = nbf_hour_complete,FUN = sum) 
+nbf_hour_sum <- aggregate(number_of_objects~month+hour,data = nbf_hour_complete,FUN = sum)
+nbf_month_sum <- aggregate(number_of_objects~month,data = nbf_hour_complete,FUN = sum)
+
+bc_day_sum <- aggregate(number_of_objects~day,data = bc_hour_complete,FUN = sum) 
+bc_week_sum <- aggregate(number_of_objects~week,data = bc_hour_complete,FUN = sum) 
+bc_hour_sum <- aggregate(number_of_objects~month+hour,data = bc_hour_complete,FUN = sum)
+bc_month_sum <- aggregate(number_of_objects~month,data = bc_hour_complete,FUN = sum)
+
+```
+
+```{r}
+# day
+par(mfrow = c(2, 1))
+plot(bc_day_sum,type="l",xaxt = "n",main="Big Cojo",
+     xlab="Day",ylab="Count",col="red")
+axis(1, at=seq(min(bc_day_sum$day),max(bc_day_sum$day),by = 10),
+     labels=seq(10,50,10))
+
+plot(nbf_day_sum,type="l",xaxt = "n",main="North Beach Fort",
+     xlab="Day",ylab="Count",col="blue")
+axis(1, at=seq(min(nbf_day_sum$day),max(nbf_day_sum$day),by = 10),
+     labels=seq(10,70,10))
+```
+
+```{r}
+# week
+par(mfrow = c(2, 1))
+plot(bc_week_sum,type="l",xaxt = "n",main="Big Cojo",
+     xlab="Week",ylab="Count",col="red")
+axis(1, at=seq(min(bc_week_sum$week),max(bc_week_sum$week),by = 1),
+     labels=seq(1,8,1))
+
+plot(nbf_week_sum,type="l",xaxt = "n",main="North Beach Fort",
+     xlab="Week",ylab="Count",col="blue")
+axis(1, at=seq(min(nbf_week_sum$week),max(nbf_week_sum$week),by = 1),
+     labels=seq(1,9,1))
+```
+
+```{r}
+# month
+par(mfrow = c(2, 1))
+plot(bc_month_sum,type="l",xaxt = "n",main="Big Cojo",
+     xlab="Month",ylab="Count",col="red")
+axis(1, at=seq(min(bc_month_sum$month),max(bc_month_sum$month),by = 1),
+     labels=seq(7,9,1))
+
+plot(nbf_month_sum,type="l",xaxt = "n",main="North Beach Fort",
+     xlab="Month",ylab="Count",col="blue")
+axis(1, at=seq(min(nbf_month_sum$month),max(nbf_month_sum$month),by = 1),
+     labels=seq(6,8,1))
+```
+
+```{r}
+bc_hour_sum <- bc_hour_sum[!(bc_hour_sum$month==7),]
+
+par(mfrow = c(2, 1))
+month_bc <- c("Big Cojo August","Big Cojo September")
+for (i in 8:9){
+  par(mar = c(4.1, 4.1, 1.1, 1.1))
+  plot(x=bc_hour_sum[bc_hour_sum$month==i,"hour"],
+       y=bc_hour_sum[bc_hour_sum$month==i,"number_of_objects"],
+       col="red",xlab="hour of day",ylab="Count",
+       ylim=c(0,220),main= month_bc[i-7],type="l")
+}
+```
+
+```{r}
+par(mfrow = c(3, 1))
+month_nbf <- c("North Beach Fort June","North Beach Fort July","North Beach Fort August")
+for (i in 6:8){
+  par(mar = c(4.1, 4.1, 1.1, 1.1))
+  plot(x=nbf_hour_sum[nbf_hour_sum$month==i,"hour"],
+       y=nbf_hour_sum[nbf_hour_sum$month==i,"number_of_objects"],
+       col="blue",xlab="hour of day",ylab="Count",
+       ylim=c(0,360),main= month_nbf[i-5],type="l")
+}
+```
+
+

@@ -1,0 +1,634 @@
+---
+title: "Why Model Specification Matters: ARIMA vs. Count Models"
+author: "Ryan Wang"
+date: "2023-07-11"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    theme: bootstrap
+---
+
+```{=html}
+<style type="text/css">
+.main-container {
+  max-width: 1000px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+```
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width = 10, fig.height = 6)
+library(tidyverse)
+library(tidymodels)
+library(dplyr)
+library(here)
+library(zoo)
+library(tseries)
+library(stats)
+library(astsa)
+library(forecast)
+library(car)
+library(MASS)
+library(finalfit) 
+library(ggplot2)
+library(forecast)
+library(lubridate)
+library(astsa)
+library(dynlm)
+library(knitr)
+library(nlme)
+library(tscount)
+library(mgcv)
+library(pscl)
+library(glmmTMB)
+dat <- read.csv(here("data", "bc_hour_complete.csv"))
+```
+
+## Introduction
+
+In time series analysis, selecting the correct model family is more important than finding the "best" parameters for the wrong family. This analysis demonstrates this principle by comparing two approaches to modeling the North Beach Fort Cam data, which is count data (number of animals, a non-negative integer).
+
+Counter-Example: The (problematic) approach of using ARIMA on Box-Cox transformed data.
+
+Correct Approach: Using a model designed for count data, specifically a Negative Binomial (NB) INGARCH model via the tsglm function.
+
+We will show how the first method, while seemingly valid on the transformed scale, produces uninterpretable and nonsensical results, while the second method provides a robust and interpretable fit.
+
+## Section 1: The Data & Initial Setup
+
+```{r}
+dat_test <- ts(dat$number_of_objects[(19):(19+672+12)])
+dat_train <- ts(dat$number_of_objects[(19):(19+672)]) 
+dat_time <- strptime(dat$time[(19):(19+672)], "%m/%d/%Y %H:%M")
+tsplot(x=dat_time, y=dat_train, xlab = 'time', ylab = 'Count')
+```
+
+This plot shows a few key properties:
+
+-   Count Data: The data consists of non-negative integers.
+
+-   Heteroskedasticity: The variance is not constant over time.
+
+-   Overdispersion: The variance is much larger than the mean, caused by an excess of zero counts, known as zero-inflation.
+
+```{r}
+# Check for Overdispersion (Variance >> Mean)
+mean_count <- mean(dat_train)
+var_count <- var(dat_train)
+
+kable(data.frame(Mean = mean_count, Variance = var_count), 
+      digits = 2, align = "c", 
+      caption = "Mean vs. Variance of Raw Count Data")
+```
+
+## Section 2: Counter-Example: ARIMA Model
+
+This approach tries to "fix" the data to fit an standard ARIMA model that are common used for continuous data:
+
+1.  Use a Box-Cox transformation to stabilize the variance, an assumption of stationarity.
+2.  Fit an ARIMA model to the transformed data.
+
+#### 2.1 Transformation & Model Fitting
+
+Thus, I firstly perform the Box-Cox transformation to make constant variance with $\lambda = -1.19$. 0.1 is added to every data point so that the algorithm works.
+
+Mathematically, the Box-Cox transformation of the variable has the form:
+
+$y(\lambda) = \frac{y^{\lambda} - 1}{\lambda}$ if $\lambda  \neq 0$ $y(\lambda) = log(y)$ if $\lambda = 0$.
+
+Thus, in this case, $y(-1.19) = \frac{y^{-1.19} - 1}{-1.19}$
+
+```{r}
+bc_transform <-boxcox(lm((dat_train+0.1) ~ 1), plotit = FALSE)
+lambda <- bc_transform$x[which.max(bc_transform$y)]
+dat_bc <- BoxCox(dat_train + 0.1, lambda)
+
+tsplot(dat_bc, main = "Box-Cox Transformed Data (lambda = -1.19)",
+       ylab = "Transformed Value")
+acf_pacf<-acf2(dat_bc, main = "Box-Cox Transformed Data (lambda = -1.19)")
+```
+
+ACF plot and PACF plot show strong evidence of seasonality at lags around 12 or 13. We can try a $SARIMA(2,0,2)(2,0,2,12)$ model.
+
+```{r}
+arima_model <-arima(dat_bc, order=c(2,0,2), seasonal = list(order=c(2,0,2),period=12))
+# 1. Normality test
+arima_model_residual <- residuals(arima_model)
+hist(arima_model_residual,density=20,breaks=20,col="blue",xlab="",main = "Histogram of Residual",prob=TRUE)
+
+# 2. Correlation test
+acf_pacf_residual<-acf2(arima_model_residual) 
+Box.test(arima_model_residual, type = c("Box-Pierce"))
+Box.test(arima_model_residual, lag = 24, type = c("Box-Pierce"))
+```
+
+On the surface, the residuals for this model look acceptable (the Ljung-Box p-value is high), suggesting no significant autocorrelation is left.
+
+But the residual's histogram shows the problem: the residual is not normally distributed as expected because the model is systematically under-predicting the "bursts" of animal counts.
+
+#### 2.2 The Problem: Interpreting Fitted Values
+
+The real problem appears when we try to interpret the model's fitted values on the original scale.
+
+```{r}
+fitted_bc <- fitted(arima_model)
+
+# Reverse the Box-Cox transformation
+fitted_orig <- InvBoxCox(fitted_bc, lambda = lambda) - 0.1
+fitted_orig[fitted_orig < 0] <- 0
+
+tsplot(x=dat_time, y=dat_train, main = 'Problem: ARIMA Fitted Values (Original Scale)',
+        ylab = 'Count', col = "blue", lwd = 1)
+lines(x=dat_time, y=fitted_orig, col = "red", lwd = 2)
+legend("topleft", lwd = c(1, 2), col = c("blue", "red"), 
+       legend = c("Actual Raw Data", "Back-Transformed Fitted Values"))
+```
+
+The fundamental failure of the $SARIMA(2,0,2)(2,0,2)_{12}$ model is not a flaw in the ARIMA method itself, but a consequence of model misspecification rooted in the data's nature. The analysis began with non-negative, integer count data that has severe heteroskedasticity and overdispersion.
+
+The Box-Cox transformation (with $\lambda = -1.19$), an attempt to fix the heteroskedasticity for an ARIMA model, was the critical step. This transformation severely distorted the data's structure: it shrunk all meaningful bursts into a nearly indistinguishable range of values, while mapping the most frequent data point (0) to a large negative value. The ARIMA model then learned that the average of this transformed data was a negative number. As shown on the plot, when this fitted average is back-transformed, it results in a value near 0.
+
+## Section 3: The Correct Approach: Count Time Series Models
+
+The fix is to use a model that is designed for count data. We will use a Generalized Linear Model framework, which is often called an INGARCH (Integer GARCH) model.
+
+#### 3.1 The Baseline Count Model: Poisson
+
+The simplest and most fundamental model for count data is the Poisson distribution. It serves as a natural starting point because it is defined by a single parameter.
+
+Mathematically, the Poisson distribution gives the probability of observing $k$ events at a given time $t$, given an expected mean rate $\mu_t$. The probability mass function (PMF) is:$$P(Y_t = k | \mu_t) = \frac{\mu_t^k e^{-\mu_t}}{k!}$$
+
+Here, $k$ must be a non-negative integer ($k = 0, 1, 2, ...$). A property of this distribution is that its variance is mathematically equal to its mean:$$\text{E}[Y_t] = \text{Var}[Y_t] = \mu_t$$ This property is known as equidispersion.
+
+In a time series context, we don't assume the mean $\mu_t$ is constant. Instead, we model it as a function of past values, creating an autoregressive structure.
+
+This is the goal of the tsglm (Time Series Generalized Linear Model) function. To ensure that our model's predictions for the mean $\mu_t$ are always positive, we use a log link function.
+
+This means we model the logarithm of the mean as a linear combination of past observations and past fitted means:$$log(\mu_t) = \beta_0 + \sum_{i \in I} \beta_i Y_{t-i} + \sum_{j \in J} \alpha_j log(\mu_{t-j})$$Where $I$ and $J$ are the sets of specified lags for the "past observations" and "past means," respectively.
+
+In our model specification, we set $I = \{1, 2, 12\}$ and $J = \{1, 2, 12\}$. The model estimates $\mu_t$ based on the counts from 1, 2, and 12 hours ago, and the fitted means from 1, 2, and 12 hours ago to account for the moving average, autoregressive, and the seasonal components of the data.
+
+```{r}
+poisson_model <- tsglm(
+  dat_train, 
+  model = list(past_obs = c(1, 2, 12), past_mean = c(1, 2, 12)),
+  distr = "poisson",
+  link = "log"
+)
+```
+
+```{r}
+fitted_poisson <- fitted(poisson_model)
+tsplot(x=dat_time, y=dat_train, 
+        main = 'Poisson Model (tsglm) - Fitted vs Actual',
+        ylab = 'Count',
+        col = "blue",
+        lwd = 1)
+
+lines(x = dat_time, y=fitted_poisson, col = "red", lwd = 2)
+legend("topleft", 
+       lwd = c(1, 2), 
+       col = c("blue", "red"), 
+       legend = c("Actual Raw Data", "Fitted"))
+```
+
+But the model is constrained by the equidispersion assumption, which can lead to invalid conclusions.
+
+#### 3.2 The Solution: Negative Binomial (NB) Model
+
+The Negative Binomial distribution is the standard model for overdispersed count data and can be thought of as a clever extension of the Poisson model. It's often derived as a Poisson-Gamma mixture. This assumes that the data $Y_t$ follows a Poisson distribution, but the mean rate $\mu_t$ is not a fixed parameter. Instead, $\mu_t$ is itself a random variable that follows a Gamma distribution. By combining these two distributions, we get the Negative Binomial distribution. Its key property is its mean-variance relationship:$$\text{E}[Y_t] = \mu_t$$$$\text{Var}[Y_t] = \mu_t + \frac{1}{\phi}\mu_t^2 = \mu_t(1 + \frac{\mu_t}{\phi})$$Here, $\phi$ is the dispersion parameter, which the model estimates from the data.
+
+Unlike the rigid $Var(Y_t) = \mu_t$ assumption of the Poisson model, this new structure allows the variance to be a quadratic function of the mean so that the variance can grow much faster than the mean.
+
+We fit the model using the exact same autoregressive structure as the Poisson model, but by changing one argument: distr = "nbinom". The model will now estimate the same AR/MA coefficients ($\beta$s and $\alpha$s) plus the new dispersion parameter $\phi$.
+
+```{r}
+nb_model <- tsglm(
+  dat_train, 
+  model = list(past_obs = c(1, 2, 12), past_mean = c(1, 2, 12)),
+  distr = "nbinom", 
+  link = "log"
+)
+```
+
+```{r}
+nbf_fitted_nb <- fitted(nb_model)
+tsplot(x=dat_time, y=dat_train, 
+        main = 'Negative Binomial Model (tsglm) - Fitted vs Actual',
+        ylab = 'Count',
+        col = "blue",
+        lwd = 1)
+
+lines(x = dat_time, y=nbf_fitted_nb, col = "red", lwd = 2)
+legend("topleft", 
+       lwd = c(1, 2), 
+       col = c("blue", "red"), 
+       legend = c("Actual Raw Data", "Fitted"))
+```
+
+Visually, the negative binomial model's fitted line may looks similar to the Poisson model's fitted line.
+
+This is because both Poisson and NB models use the exact same formula to calculate this mean:
+
+$$log(\mu_t) = \beta_0 + \beta_1 Y_{t-2} + \beta_2 Y_{t-24} + \alpha_1 log(\mu_{t-2}) + \alpha_2 log(\mu_{t-24})$$ But we see big difference in AIC and BIC.
+
+```{r}
+model_comparison <- data.frame(
+  Model = c("Poisson", "Negative Binomial"),
+  AIC = c(AIC(poisson_model), AIC(nb_model)),
+  BIC = c(BIC(poisson_model), BIC(nb_model))
+)
+
+kable(model_comparison, digits = 2, align = "c", 
+      caption = "Model Fit Comparison")
+```
+
+AIC and BIC are determined by the log-likelihood, which measures how probable the actual data is, given the model's entire distribution. The Poisson model's rigid variance equals mean assumption makes the observed "spiky" data statistically impossible.
+
+The Negative Binomial model uses a dispersion parameter to allow $Var > Mean$, correctly modeling the spikes as plausible. It's a more realistic fit, resulting in a much lower AIC/BIC.
+
+## Section 4: Refining the Model with External Regressors
+
+The baseline Negative Binomial model in Section 3 was a massive improvement over the Poisson model, as confirmed by the AIC/BIC comparison. This is because it correctly modeled the data's overdispersion.
+
+However, its approach to seasonality (using past_obs = c(1, 2, 12) and past_mean = c(1, 2, 12)) is somewhat implicit. A more robust and interpretable method is to explicitly model the strong 24-hour cycle using dummy variables.
+
+#### 4.1 Incorporating Hourly Seasonality
+
+First, we create a matrix of 24 dummy variables, xreg_hourly, where each column represents one hour of the day. This approach is conceptually very similar to an FIR (Finite Impulse Response) model in fMRI analysis.
+
+In an fMRI FIR model, the GLM uses dummy regressors for each time bin after a stimulus to "selectively average" the signal at that specific time point. Here, we are doing the exact same thing: by feeding the tsglm model 24 dummy variables, we are asking it to perform a "selective average" for each hour. The model will estimate 24 separate coefficients ($\beta$s), one for each hour, letting the data reveal the 24-hour activity "shape" without us having to assume it beforehand.
+
+$$log(\mu_t) = \underbrace{\sum_{j=1}^{24} \gamma_j \cdot \text{hour}_j(t)}_{\text{Hourly Dummies (xreg)}} + \underbrace{\beta_1 Y_{t-1} + \beta_2 Y_{t-2}}_{\text{past_obs (AR part)}} + \underbrace{\alpha_1 log(\mu_{t-1}) + \alpha_2 log(\mu_{t-2})}_{\text{past_mean (MA part)}}$$
+
+Where:$h_j(t)$ is the dummy variable for the $j^{th}$ hour ($1$ if the observation at time $t$ is from hour $j$, and $0$ otherwise).$\gamma_j$ is the coefficient for the $j^{th}$ hour.
+
+```{r}
+n_train <- length(dat_train)
+time_of_day_index <- (1:n_train - 1) %% 24
+time_factor <- factor(time_of_day_index)
+xreg_hourly <- model.matrix(~ time_factor - 1)
+
+nb_model_hourly <- tsglm(
+  dat_train,
+  model = list(past_obs = c(1, 2), past_mean = c(1, 2)),
+  xreg = xreg_hourly,                           
+  distr = "nbinom",
+  link = "log"
+)
+```
+
+```{r}
+nb_model_hourly_fitted <- fitted(nb_model_hourly)
+
+tsplot(x= dat_time ,y=dat_train,
+  main = 'Negative Binomial Model with Time Dummies: Fitted vs Actual',
+  ylab = 'Count',
+  col = "blue",
+  lwd = 1)
+lines(x = dat_time, y=nb_model_hourly_fitted, col = "red", lwd = 2)
+legend("topleft",
+  lwd = c(1, 2),
+  col = c("blue", "red"),
+  legend = c("Actual Raw Data", "Fitted"))
+```
+
+#### 4.2 Incorporating Weekly Seasonality
+
+We can extend this same logic to see if there is also a 7-day (weekly) pattern on top of the dominant hourly one. We create a second set of dummy variables for the day of the week and bind them to our existing hourly matrix to create xreg_combined.
+
+$$log(\mu_t) = \underbrace{\sum_{j=1}^{24} \gamma_j \cdot \text{hour}_j(t)}_{\text{Hourly Dummies}} + \underbrace{\sum_{k=1}^{6} \delta_k \cdot \text{day}_k(t)}_{\text{Weekly Dummies}} + \underbrace{\beta_1 Y_{t-1} + \beta_2 Y_{t-2}}_{\text{past_obs (AR)}} + \underbrace{\alpha_1 log(\mu_{t-1})}_{\text{past_mean (MA)}}$$
+
+```{r}
+n_train <- length(dat_train)
+day_of_week_index <- (floor((1:n_train - 1) / 24)) %% 7
+day_factor <- factor(day_of_week_index)
+
+
+xreg_weekly <- model.matrix(~ day_factor)
+xreg_combined <- cbind(xreg_hourly, xreg_weekly[, -1])
+
+nb_model_combined <- tsglm(
+  dat_train,
+  model = list(past_obs = c(1, 2), past_mean = c(1, 2)), 
+  xreg = xreg_combined, 
+  distr = "nbinom",
+  link = "log"
+)
+# summary(nb_model_combined)
+```
+
+```{r}
+nb_model_combined_fitted <- fitted(nb_model_combined)
+
+tsplot(x=dat_time, y=dat_train,
+  main = 'Negative Binomial Model with Time and Week Dummies: Fitted vs Actual',
+  ylab = 'Count',
+  col = "blue",
+  lwd = 1)
+
+lines(x=dat_time, y=nb_model_combined_fitted, col = "red", lwd = 2)
+legend("topleft",
+  lwd = c(1, 2),
+  col = c("blue", "red"),
+  legend = c("Actual Raw Data", "Fitted"))
+```
+
+```{r}
+model_comparison <- data.frame(
+  Model = c("1. Poisson (Baseline)", 
+            "2. NB (Baseline)", 
+            "3. NB + Hourly Pattern", 
+            "4. NB + Hourly/Weekly Pattern"),
+  AIC = c(AIC(poisson_model), 
+          AIC(nb_model), 
+          AIC(nb_model_hourly), 
+          AIC(nb_model_combined)),
+  BIC = c(BIC(poisson_model), 
+          BIC(nb_model), 
+          BIC(nb_model_hourly), 
+          BIC(nb_model_combined))
+)
+
+kable(model_comparison, digits = 2, align = "c", 
+      caption = "Model Fit Comparison")
+```
+
+-   NB (Baseline) vs. NB + Hourly Pattern
+
+Adding the hourly xreg dummies decreased the AIC (1538.08 $\rightarrow$ 1517.07) but increased the BIC (1574.18 $\rightarrow$ 1652.42). The AIC decreased, suggesting that the model with hourly dummies provides a better predictive fit, even after penalizing for the 23 extra parameters. BIC increased as it penalizes the more on the model complexity.
+
+-   NB + Hourly Pattern vs. 4. NB + Hourly/Weekly Pattern
+
+Adding the weekly regressors increased both the AIC (1517.07 $\rightarrow$ 1536.94) and the BIC (1652.42 $\rightarrow$ 1699.36). The model gets worse by both metrics when weekly dummies are added. This provides strong evidence that there is no significant 7-day pattern in the data, after the dominant 24-hour cycle has been accounted for.
+
+The result suggests that animals show up in a nocturnal pattern, but the day of the week has little effect on their probability of showing up.
+
+#### 4.3: An Alternative Approach: Generalized Additive Models (GAM)
+
+An alternative to model the 24-hour cycle using 24 dummy variables and often more powerful approach is to use a Generalized Additive Model (GAM). A GAM is an extension of a GLM that allows us to model a predictor non-linearly using "smooth functions."
+
+Instead of estimating 24 separate $\beta$ coefficients (one for each hour), we can instead estimate a single smooth function for the hour variable.
+
+$log(\mu_t) = \beta_0 + f(\text{hour}_t) + \beta_1 Y_{t-1} + \beta_2 Y_{t-2}$
+
+For $f(\text{hour}_t)$, we use s(hour, bs = "cc"):
+
+-   s(): This tells the gam function to fit a smooth spline to the hour predictor.bs = "cc": This specifies the type of basis for the spline.
+
+-   "cc" stands for a cyclic cubic spline. This is mathematically ideal for our data, as it constrains the spline so that the endpoint (hour 23:00) connects smoothly back to the start point (hour 00:00).
+
+```{r}
+gam_data <- data.frame(
+  count = as.numeric(dat_train),      
+  time_index = 1:n_train             
+)
+
+gam_data$hour <- (gam_data$time_index - 1) %% 24
+gam_data$lag1 <- lag(gam_data$count, 1)
+gam_data$lag2 <- lag(gam_data$count, 2)
+gam_data_clean <- na.omit(gam_data)
+
+gam_model <- gam(
+  count ~ s(hour, bs = "cc") + lag1 + lag2,
+  family = nb(),
+  data = gam_data_clean,
+  method = "REML"
+)
+```
+
+```{r}
+fitted_gam <- c(
+  rep(NA, nrow(gam_data) - nrow(gam_data_clean)), 
+  fitted(gam_model)
+)
+
+tsplot(x= dat_time, y=dat_train,
+        main = 'GAM (NB + Cyclic Spline) Fitted vs Actual',
+        ylab = 'Count',
+        col = "blue",
+        lwd = 1)
+
+lines(x= dat_time, y=fitted_gam, col = "red", lwd = 2)
+legend("topleft",
+       lwd = c(1, 2),
+       col = c("blue", "red"),
+       legend = c("Actual Raw Data", "Fitted (GAM)"))
+```
+
+```{r}
+model_comparison <- data.frame(
+  Model = c("1. Poisson (Baseline)", 
+            "2. NB (Baseline)", 
+            "3. NB + Hourly Pattern", 
+            "4. NB + Hourly/Weekly Pattern",
+            "5. GAM + Smooth Hourly Pattern"),
+  AIC = c(AIC(poisson_model), 
+          AIC(nb_model), 
+          AIC(nb_model_hourly), 
+          AIC(nb_model_combined),
+          AIC(gam_model)),
+  BIC = c(BIC(poisson_model), 
+          BIC(nb_model), 
+          BIC(nb_model_hourly), 
+          BIC(nb_model_combined),
+          BIC(gam_model))
+)
+
+kable(model_comparison, digits = 2, align = "c", 
+      caption = "Model Fit Comparison")
+```
+
+We achieve a new low on the AIC/BIC, meaning that the GAM is a better fit.
+
+```{r}
+plot(
+  gam_model, 
+  pages = 1,
+  shift = coef(gam_model)[1],
+  trans = exp,
+  main = "Partial Effect of Hour on Animal Count",
+  xlab = "Hour of Day",
+  ylab = "Estimated Mean Animal Count"
+)
+```
+
+We can also directly plot the shape of this smooth function $f(\text{hour}_t)$. From the plot, we see that animals are more likely to be present during the night.
+
+## Section 5: Zero-Inflated Model
+
+Our analysis has so far established that the gam_model with a Negative Binomial family is our best fit.
+
+The standard NB model assumes a single generating process for all observations. Its probability mass function (PMF) is:$$P(Y=y \mid \mu, \theta) = \frac{\Gamma(y + \theta)}{y! \Gamma(\theta)} \left( \frac{\theta}{\mu + \theta} \right)^\theta \left( \frac{\mu}{\mu + \theta} \right)^y$$$\mathbf{y}$: The number of counts ($y = 0, 1, 2, ...$).
+
+$\mathbf{\mu}$: The mean count ($\mu > 0$).
+
+$\mathbf{\theta}$: The dispersion parameter.
+
+In this framework, all zeros are "sampling zeros." Forcing this single distribution to account for an excessive number of zeros can "pull down" or deflate the mean estimate ($\mu$) for the periods that are genuinely active.
+
+The ZINB model assumes the data comes from a mixture of two separate processes: a "zero" process and a "count" (NB) process.Let $\pi$ (pi) be the probability of being in the "structural zero" process. The PMF is:$$P(Y=y \mid \mu, \theta, \pi) =
+\begin{cases}
+\pi + (1-\pi) \cdot P_{NB}(y=0 \mid \mu, \theta) & \text{if } y = 0 \\
+(1-\pi) \cdot P_{NB}(y=y \mid \mu, \theta) & \text{if } y > 0
+\end{cases}$$
+
+Process 1: Structural Zeros (The $\pi$ Component)
+
+This is a "perfect" zero-generating process. With probability $\pi$, the observation is guaranteed to be zero, regardless of the NB process. These are counts that are structurally incapable of being anything other than zero. (e.g., the camera is down, or it's a time of day when animals are biologically guaranteed to be absent).
+
+Process 2: The NB Count Component (The $1-\pi$ Component)
+
+With probability $1-\pi$, the observation comes from the standard Negative Binomial "count" process. This process is governed by its own mean $\mu$ and dispersion $\theta$. Zeros can still be generated by this process, just by chance. (e.g., the camera is on, but no animals happened to pass by).
+
+We first fit a AR(2) process for simplicity:
+
+```{r}
+zinb_model <- zeroinfl(
+  count ~ lag1 + lag2 | factor(hour),  
+  data = gam_data_clean,      
+  dist = "negbin"
+)
+```
+
+```{r}
+fitted_counts <- predict(zinb_model, type = "count")
+fitted_zinb_counts <- c(
+  rep(NA, nrow(gam_data) - nrow(gam_data_clean)), 
+  fitted_counts
+)
+fitted_zeros_prob <- predict(zinb_model, type = "zero")
+fitted_zinb_zeros <- c(
+  rep(NA, nrow(gam_data) - nrow(gam_data_clean)), 
+  fitted_zeros_prob
+)
+
+tsplot(x = dat_time, y = dat_train,
+       main = 'ZINB "Count" Component vs Actual',  # New title
+       ylab = 'Count',
+       col = "blue",
+       lwd = 1)
+
+lines(x = dat_time, y = fitted_zinb_counts, col = "red", lwd = 2)
+legend("topleft",
+       lwd = c(1, 2),
+       col = c("blue", "red"),
+       legend = c("Actual Raw Data", "Fitted (ZINB Count Model)"))
+```
+
+First, we plot the "count" component, which is driven by lag1 and lag2. This shows how the model predicts the bursts when it's not in the structural zero state. We see that the model is capable of capturing more variation in count than before.
+
+```{r}
+hourly_data_to_predict <- data.frame(
+  hour = 0:23,
+  lag1 = 0,  
+  lag2 = 0   
+)
+prob_by_hour <- predict(zinb_model, 
+                        newdata = hourly_data_to_predict, 
+                        type = "zero")
+plot(x = 0:23, 
+     y = prob_by_hour, 
+     type = "b",  
+     col = "darkgreen",
+     lwd = 2,
+     main = 'ZINB "Zero" Component: Probability of Structural Zero by Hour',
+     ylab = "Probability",
+     xlab = "Hour of Day (0-23)",
+     ylim = c(0, 1), 
+     xaxt = "n"     
+)
+axis(1, at = 0:23)
+```
+
+Second, we plot the "zero-inflation" component. This plot is new and visualizes the model's estimate for $\pi$—the probability of a structural zero—as it changes over the 24-hour cycle. It confirms the result from the GAM model that the animals are more active during the nighttime.
+
+We then include the $f(\text{hour}_t)$ smooth function:
+
+```{r}
+zinb_tmb_model <- glmmTMB(
+  count ~ lag2 + s(hour, bs = "cc"),   
+  ziformula = ~ s(hour, bs = "cc"),          
+  data = gam_data_clean,
+  family = nbinom2(link = "log")
+)
+```
+
+```{r}
+fitted_tmb_counts <- predict(zinb_tmb_model, type = "conditional")
+fitted_tmb_counts <- c(
+  rep(NA, nrow(gam_data) - nrow(gam_data_clean)), 
+  fitted_tmb_counts
+)
+fitted_tmb_zero_prob <- predict(zinb_tmb_model, type = "zprob")
+fitted_tmb_zero_prob <- c(
+  rep(NA, nrow(gam_data) - nrow(gam_data_clean)), 
+  fitted_tmb_zero_prob
+)
+tsplot(x = dat_time, y = dat_train,
+       main = 'glmmTMB ZINB "Count" Component vs Actual',
+       ylab = 'Count', col = "blue", lwd = 1)
+lines(x = dat_time, y = fitted_tmb_counts, col = "red", lwd = 2)
+```
+
+```{r}
+hourly_data_to_predict <- data.frame(
+  hour = 0:23,
+  lag1 = 0,  
+  lag2 = 0   
+)
+prob_by_hour <- predict(zinb_tmb_model, 
+                        newdata = hourly_data_to_predict, 
+                        type = "zprob")
+plot(x = 0:23, 
+     y = prob_by_hour, 
+     type = "b",  
+     col = "darkgreen",
+     lwd = 2,
+     main = 'ZINB "Zero" Component: Probability of Structural Zero by Hour',
+     ylab = "Probability",
+     xlab = "Hour of Day (0-23)",
+     ylim = c(0, 1), 
+     xaxt = "n"     
+)
+axis(1, at = 0:23)
+```
+
+We see similar pattern in "count" component and "zero-inflation" component but more smooth as expected.
+
+```{r}
+model_comparison <- data.frame(
+  Model = c("1. Poisson (Baseline)", 
+            "2. NB (Baseline)", 
+            "3. NB + Hourly Pattern", 
+            "4. NB + Hourly/Weekly Pattern",
+            "5. GAM + Smooth Hourly Pattern",
+            "6. ZINB + AR(2)",
+            "7. ZINB + Hourly Pattern"),
+  AIC = c(AIC(poisson_model), 
+          AIC(nb_model), 
+          AIC(nb_model_hourly), 
+          AIC(nb_model_combined),
+          AIC(gam_model),
+          AIC(zinb_model),
+          AIC(zinb_tmb_model)),
+  BIC = c(BIC(poisson_model), 
+          BIC(nb_model), 
+          BIC(nb_model_hourly), 
+          BIC(nb_model_combined),
+          BIC(gam_model),
+          BIC(zinb_model),
+          BIC(zinb_tmb_model))
+)
+
+kable(model_comparison, digits = 2, align = "c", 
+      caption = "Model Fit Comparison")
+```
+
+Switching from a standard Negative Binomial model to a Zero-Inflated Negative Binomial (ZINB) model resulted in a massive AIC drop. It suggests that the data is not just overdispersed but is generated by two distinct processes:
+
+A "Structural Zero" process, where the count is always 0, and a "Count" process, where the system is "on" and can produce bursts or zeros by chance.
