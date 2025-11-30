@@ -686,4 +686,11 @@ Second, the model assumes a stationary diurnal cycle over the four-week period b
 Finally, although the likelihood ratio tests confirmed the importance of diurnal structure and the cyclic spline provided a more parsimonious alternative to hourly dummy variables, the spline’s flexibility still requires careful control. Future analyses could systematically explore spline complexity (for example, effective degrees of freedom or knot placement) to balance model parsimony with the biological irregularities of animal movement.
 
 \newpage
+**Data and Code Availability**
+
+The raw camera-trap data were provided by Project ECOTONE (University of California, Santa Barbara) and are available at: <https://github.com/zoelzilz/project_ecotone>. 
+
+All statistical analyses were performed using R (v4.3.2). The complete source code, processed datasets, and RMarkdown files required to reproduce the results, figures, and tables presented in this manuscript are available at: <https://github.com/RyanWang1119/Project_ECOTONE>.
+\newpage
+
 # References
