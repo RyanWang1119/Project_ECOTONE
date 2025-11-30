@@ -1,0 +1,689 @@
+---
+title: "Why Model Specification Matters: ARIMA vs. Count Models"
+subtitle: "An Evaluation of Zero-Inflated Dynamics in Ecological Time Series \\vspace{2cm}"
+author: 
+  - "Ryan Wang \\vspace{0.5cm}"
+  - "Department of Biostatistics, Johns Hopkins Bloomberg School of Public Health \\vspace{0.5cm}"
+date: "November 2025"
+output:
+  pdf_document:
+    number_sections: true
+    toc: false
+    toc_depth: 2
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 2
+fontsize: 12pt
+geometry: margin=1in
+header-includes:
+  - \usepackage{setspace}
+  - \onehalfspacing
+  - \usepackage{booktabs}
+  - \usepackage{caption}
+  - \usepackage{longtable}
+  - \usepackage{array}
+  - \usepackage{multirow}
+  - \usepackage{wrapfig}
+  - \usepackage{float}
+  - \usepackage{colortbl}
+  - \usepackage{pdflscape}
+  - \usepackage{tabu}
+  - \usepackage{threeparttable}
+bibliography: references.bib
+# csl: apa.csl
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.align = "center", fig.width = 6.5, fig.height = 3.5)
+library(tidyverse)
+library(tidymodels)
+library(dplyr)
+library(here)
+library(kableExtra)
+library(zoo)
+library(tseries)
+library(stats)
+library(astsa)
+library(forecast)
+library(car)
+library(MASS)
+library(finalfit) 
+library(ggplot2)
+library(forecast)
+library(lubridate)
+library(astsa)
+library(dynlm)
+library(knitr)
+library(nlme)
+library(tscount)
+library(mgcv)
+library(pscl)
+library(glmmTMB)
+library(lmtest)
+dat <- read.csv(here("data", "bc_hour_complete.csv"))
+```
+
+\newpage
+
+\begin{singlespace} \tableofcontents \end{singlespace} \newpage
+
+# Abstract {.unnumbered}
+
+Model specification is central to valid inference and interpretation in time series analysis. Using ecological camera-count data as a case study, I demonstrate the limitations of applying ARIMA with Box-Cox transformations to discrete, overdispersed data. I contrast this mis-specified baseline against distribution-appropriate count models: Poisson and Negative Binomial INGARCH (via tsglm), Generalized Additive Models (GAM) with cyclic splines, and Zero-Inflated Negative Binomial (ZINB) variants. The analysis reveals that while ARIMA diagnostics may appear passable, the model fails to capture the data's generative mechanism. Conversely, the ZINB-GAM specification yields superior fit (lowest AIC/BIC) and resolves the distinction between structural zeros and active periods, offering a biologically interpretable view of diurnal patterns that Gaussian approximations obscure.
+
+\newpage
+
+# Introduction
+
+ARIMA (and its seasonal variant, SARIMA) is the dominant framework taught in time-series curricula and widely applied across disciplines (e.g., economic time series) [@box1976time]. While valid for real-valued, approximately Gaussian series, this framework often falters in epidemiology and ecology. Data in these fields—such as the camera-trap counts analyzed here—consist of non-negative integers where (i) the support is discrete and bounded at zero, and (ii) the variance typically exceeds the mean (overdispersion) often accompanied by zero-inflation [@martin2005zero; @warton2005many].
+
+Treating such series as transformed Gaussian processes can be misleading: it may produce impossible forecasts (e.g., negative counts) or pass surface-level diagnostics while failing to capture the true data-generating mechanism. Accordingly, I use ARIMA only as a mis-specified baseline to contrast against models aligned with the data’s structure: NB-INGARCH for overdispersion, GAM terms for cyclic diurnal patterns, and ZINB to explicitly model the ecological distinction between absence and non-detection.
+
+This analysis confirms these theoretical risks in practice. I demonstrate that while the SARIMA baseline satisfies standard correlation diagnostics, it yields numerically unstable and biologically biased forecasts on the original scale. In contrast, the ZINB-GAM specification not only achieves a improvement in fit but successfully resolves the biological distinction between midday structural absence and nocturnal activity bursts.
+
+# Data
+
+The data come from Project ECOTONE (UCSB; Dr. Zoe Zilz), a camera-trap study on the Gaviota Coast investigating energetic connectivity between marine and terrestrial systems.
+
+Raw data is timestamped detections with station ID and species labels. For count time-series modeling, I (i) filter to target species (coyotes), (ii) collapse rapid re-triggers into a single event per short window, (iii) aggregate to hourly counts in local time, and (iv) fill missing hours with 0 to preserve true absences. Crucially, this step assumes that gaps in the timestamp record correspond to periods of camera operation where no triggers occurred, rather than equipment failure. I analyze a 4-week window from August 1, 2022 to August 29, 2022.
+
+```{r, echo=FALSE}
+i0 <- 19
+n_train <- 672
+idx_train <- i0:(i0 + n_train - 1)   
+
+tz_local <- "America/Los_Angeles"
+df_train <- data.frame(
+  time  = as.POSIXct(strptime(dat$time[idx_train], "%m/%d/%Y %H:%M"), tz = tz_local),
+  count = dat$number_of_objects[idx_train]
+)
+dat_train <- df_train$count
+
+mean_count <- mean(df_train$count, na.rm = TRUE)
+var_count  <- var(df_train$count,  na.rm = TRUE)
+zero_prop  <- mean(df_train$count == 0, na.rm = TRUE)
+vmr        <- var_count / mean_count
+
+subtitle_txt <- sprintf(
+  "Mean = %.2f · Var = %.2f · Zero rate = %.1f%% · Var/Mean = %.2f",
+  mean_count, var_count, 100 * zero_prop, vmr
+)
+
+df_train$ma24 <- tryCatch(
+  zoo::rollmean(df_train$count, 24, fill = NA, align = "right"),
+  error = function(e) rep(NA_real_, nrow(df_train))
+)
+```
+
+```{r plot_data_overview, echo=FALSE, out.width="80%", fig.pos="H", fig.cap="Time Series of Hourly Counts. The data exhibit discrete steps, extreme overdispersion (Var=33.25 vs Mean=2.11), and a high zero rate (82.6%). The blue line represents the 24-hour moving average."}
+ggplot(df_train, aes(time, count)) +
+  geom_step() +
+  geom_point(size = 0.6, alpha = 0.6) +
+  geom_line(aes(y = ma24), linewidth = 0.7, colour = "blue") +
+  labs(
+    x = "Time", y = "Count" ) +
+  scale_x_datetime(date_breaks = "7 day", date_labels = "%b %d") +
+  expand_limits(y = 0) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(hjust = 0.5)
+  )
+```
+
+Visual inspection and summary statistics reveal four critical features that violate standard Gaussian assumptions:
+
+**Discrete Support**: The data are strictly non-negative integers.
+
+**Extreme Overdispersion**: The variance ($s^2 \approx 33.25$) is more than 15 times the mean ($\bar{x} \approx 2.11$), violating the equidispersion assumption ($Mean = Variance$) required by standard Poisson models.
+
+**Zero-Inflation**: A substantial proportion of the hourly bins contain zero counts. These "quiet" periods are likely a mix of true absences and detection failures.
+
+**Heteroskedasticity**: The time series is characterized by long lulls followed by sudden, high-magnitude "bursts" of activity (up to 50 detections/hour), creating volatility that scales with the mean level of the series.
+
+Biologically, this volatility reflects the nocturnal nature of the target species. The "zero-inflation" is not statistical noise but represents the behavior of midday inactivity, while the "bursts" correspond to active hunting periods at dawn, dusk, and overnight.
+
+\newpage
+
+# Methods
+
+The modeling strategy follows a stepwise progression designed to isolate specific features of the data-generating process:
+
+Baseline Specification: I first fit a SARIMA model with a Box-Cox transformation to demonstrate the limitations of Gaussian approximations for discrete, zero-heavy data.
+
+Distributional Choice: I then transition to count-specific INGARCH models, comparing Poisson and Negative Binomial distributions to address overdispersion.
+
+Seasonal Structure: I refine the diurnal component by comparing discrete hourly dummy variables against smooth cyclic splines (GAM) to determine the most parsimonious representation of the 24-hour cycle.
+
+Zero-Inflation: Finally, I extend the framework to a Zero-Inflated Negative Binomial (ZINB) specification to explicitly distinguish between structural absences and active counts, evaluating model superiority via Likelihood Ratio Tests and Information Criteria (AIC/BIC).
+
+## Baseline: SARIMA with Box–Cox Transformation
+
+To establish a baseline, I apply the standard Gaussian time-series framework. This approach—common in general practice but risky for count data—relies on variance-stabilizing transformations [@box1964analysis] to coerce the discrete, heteroskedastic counts into a format that satisfies the assumptions of a SARIMA$(p,d,q)(P,D,Q)_s$ model. In notation, SARIMA$(p,d,q)\times(P,D,Q)_s$ allows both nonseasonal and seasonal differencing and short-memory AR/MA terms; $s$ is the seasonal period. The standard workflow is:
+
+1.  Induce stationarity via differencing (remove trend) and Box-Cox transformation (reduces heteroskedasticity) if needed;
+2.  Choose small orders by inspecting ACF/PACF and minimizing AIC/BIC;
+3.  Check residual autocorrelation (e.g., Ljung-Box).
+
+\newpage
+
+**Variance-stabilizing transform (Box--Cox)**
+
+```{r, echo=FALSE}
+bc_transform <-boxcox(lm((dat_train+0.1) ~ 1), plotit = FALSE)
+lambda <- bc_transform$x[which.max(bc_transform$y)]
+df_train$dat_bc <- BoxCox(dat_train + 0.1, lambda)[1:672]
+```
+
+Because $Y_t$ are non-negative counts with strong heteroskedasticity, I apply a Box-Cox transform to reduce heteroskedasticity. Let $y_t = Y_t + c$ with a small offset $c=0.1$ to avoid $\log 0$ and undefined powers at zero. The transform is
+
+$$
+Y_t^{(\lambda)} = 
+\begin{cases}
+\dfrac{y_t^\lambda - 1}{\lambda}, & \lambda \neq 0,\\\\
+\log y_t, & \lambda = 0,
+\end{cases}
+$$
+
+$\lambda$ is chosen by profile likelihood under a constant-mean/variance assumption. In our data, this procedure selects $\lambda \approx -1.2$. While this successfully stabilizes the variance, a negative $\lambda$ expands spacing near zero and compresses the upper tail, distorting the relationship between low and high counts.
+
+```{r, echo=FALSE, out.width="60%", fig.pos="H", fig.cap="Box-Cox Transformed Data ($\\lambda \\approx -1.2$). The transformation stabilizes the variance but distorts the integer nature of the counts."}
+ggplot(df_train, aes(x = time, y = dat_bc)) +
+  geom_line(color = "black") +
+  labs(
+    y = "Transformed Count",
+    x = "Time"
+  ) +
+  theme_bw() 
+```
+
+\newpage
+**ACF/PACF--guided model selection**
+
+```{r, echo=FALSE, out.width="60%", fig.pos="H", fig.cap="ACF and PACF of the Transformed Series. The diagnostics show clear seasonality at lag 24."}
+acf_pacf <- acf2(df_train$dat_bc, main = "", max.lag = 80)
+```
+
+The ACF and PACF of the transformed series exhibited clear seasonality at lag 24. Based on these diagnostics and minimization of AIC via the auto.arima algorithm, I selected a $SARIMA(2,0,2)(2,0,2)_{24}$ specification. This model includes both short-term autoregressive dynamics and a 24-hour seasonal component to capture the daily cycle.
+
+**ARIMA Model Diagnostics**
+
+```{r, echo=FALSE}
+arima_model <-arima(df_train$dat_bc, order=c(2,0,2), seasonal = list(order=c(2,0,2),period=24))
+arima_model_residual <- residuals(arima_model)
+```
+
+```{r, include=FALSE}
+Box.test(arima_model_residual, type = c("Ljung-Box"))
+Box.test(arima_model_residual, type = c("Ljung-Box"), lag = 24)
+```
+
+```{r Normality test, echo=FALSE, fig.pos="H", fig.cap="Residual Diagnostics for SARIMA Model. The Histogram and Q-Q plot reveal non-normality in the residuals, violating standard Gaussian assumptions."}
+layout(matrix(c(1, 2, 3, 3, 4, 4), nrow = 2, ncol = 3))
+acf(arima_model_residual, main = "ACF", lag.max = 72)
+pacf(arima_model_residual, main = "PACF", lag.max = 72)
+
+hist(arima_model_residual, 
+     density=20, 
+     breaks=20, 
+     col="blue", 
+     xlab="", 
+     main = "Histogram of Residual", 
+     prob=FALSE)
+
+qqnorm(arima_model_residual, 
+       main = "Normal Q-Q Plot",
+       pch = 19,        
+       cex = 0.7)      
+qqline(arima_model_residual, 
+       col = "red", 
+       lwd = 2) 
+
+par(mfrow=c(1,1))      
+```
+
+```{r, echo=FALSE, out.width="70%", fig.pos="H", fig.cap="Comparison of Actual Counts vs. Back-transformed ARIMA Fitted Values. The naive back-transformation yields the median, which systematically underestimates the bursts (biasing them toward zero)."}
+fitted_bc   <- fitted(arima_model)
+fitted_orig <- forecast::InvBoxCox(as.numeric(fitted_bc), lambda) - 0.1
+fitted_orig <- pmax(fitted_orig, 0)  
+
+ggplot(df_train, aes(x = time)) +
+  geom_line(aes(y = count, color = "Actual counts"), linewidth = 0.6) +
+  geom_line(aes(y = fitted_orig, color = "Back-transformed ARIMA fit"), linewidth = 0.8) +
+  scale_color_manual(name = NULL, 
+                     values = c("Actual Count" = "black", "Back-transformed ARIMA fit" = "red")) +
+  labs(
+    x = "Time", y = "Count", color = NULL
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+Essentially, this model creates an illusion of validity for this count time series data. Standard residual diagnostics (Ljung-Box tests, ACF plots) suggest the model has successfully captured the correlation structure ($p > 0.05$ for residual autocorrelation). However, the residual's distribution shows the problem: the residuals are not normally distributed as assumed by the ARIMA model. The failure becomes evident upon back-transformation. Because the transformation ($\lambda \approx -1.2$) treats the zeros and low counts as high-leverage points on the inverted scale, the back-transformed forecasts are systematically biased toward zero, failing to replicate the magnitude of biological activity bursts.
+
+**Technical Note: Transformation Bias and Instability**
+
+The inverse Box–Cox back-transform returns the median on the original scale, not the mean. With $\lambda \approx -1.2$ and offset $c=0.1$, the inverse function $g^{-1}(z)=(\lambda z+1)^{1/\lambda}-c$ is defined only for $z < b = -1/\lambda \approx 0.83$. As $z \uparrow b$, $g^{-1}(z) \to \infty$.
+
+Because $g^{-1}$ is convex on $(-\infty, b)$, Jensen's Inequality implies $\mathbb{E}[g^{-1}(Z)] > g^{-1}(\mathbb{E}[Z])$. Consequently, Monte Carlo estimates of the mean are systematically inflated and become numerically unstable when the predicted Gaussian density places probability mass near the asymptote $b$. I therefore report the median back-transform as a stable, qualitative baseline only. This instability itself underscores model mis-specification, motivating inference with count-scale models.
+
+\newpage
+
+## Count-Scale Models (INGARCH)
+
+To address the discreteness and non-negativity of the data, I employ an integer-valued autoregressive conditional heteroskedasticity (INGARCH) framework [@ferland2006integer], implemented using the tscount package [@liboschik2017tscount]. Section 3.2.1 contrasts Poisson and Negative-Binomial INGARCH. Section 3.2.2 introduces hour-of-day dummies and a smooth cyclic spline alternative. I conclude with model checking and AIC/BIC comparison across these four specifications.
+
+### Poisson and Negative Binomial INGARCH
+
+Let $Y_t$ be the count at time $t$ and let $\mathcal{F}_{t-1}=\sigma(Y_{t-1},Y_{t-2},\ldots)$ denote the past information. An INGARCH$(p,q)$ model specifies a conditional distribution for $Y_t$ given $\mathcal{F}_{t-1}$ and a dynamic mean $\mu_t=\mathbb{E}[Y_t \mid \mathcal{F}_{t-1}]$ that depends on the last $p$ observations and $q$ past means: $$
+Y_t \mid \mathcal{F}_{t-1} \;\sim\; \mathcal{D}(\mu_t,\;\text{dispersion}), 
+\qquad
+log(\mu_t) \;=\; \omega \;+\; \sum_{i=1}^{p}\alpha_i Y_{t-i} \;+\; \sum_{j=1}^{q}\beta_j \mu_{t-j} \;+\; \mathbf{x}_t^\top\gamma,
+$$ Here, $\omega$ is the intercept, $\alpha_i$ captures the autoregressive dependence on past counts, and $\beta_j$ represents the dependence on past expected means (moving average).
+
+**Poisson INGARCH**
+
+With $\mathcal{D}=\text{Poisson}$, the model respects discreteness and non-negativity but enforces equidispersion.
+
+$$
+Y_t \mid \mathcal{F}_{t-1} \sim \text{Pois}(\mu_t),
+\qquad
+\mathrm{Var}(Y_t \mid \mathcal{F}_{t-1})=\mu_t.
+$$
+
+**Negative-Binomial INGARCH**
+
+To accommodate overdispersion, take $\mathcal{D}=\text{Negative Binomial}$ with mean $\mu_t$ and dispersion $\kappa>0$. This model extends the Poisson INGARCH by relaxing the assumption on variance:
+
+$$
+Y_t \mid \mathcal{F}_{t-1} \sim \text{NB}(\mu_t,\kappa),
+\qquad
+\mathrm{Var}(Y_t \mid \mathcal{F}_{t-1}) \;=\; \mu_t \,\bigl(1+\kappa\,\mu_t\bigr).
+$$
+
+\newpage
+
+I start with $p=q=2$ (lags 1–2 of both $Y$ and $\mu$) to consider the short term effects only.
+
+$$
+Y_t \mid \mathcal F_{t-1} \sim \mathcal{D}(\mu_t,\text{dispersion}),
+\qquad
+\text{with }\;
+\begin{cases}
+\mathcal{D}=\mathrm{Pois}(\mu_t), & \mathrm{Var}(Y_t\mid\mathcal F_{t-1})=\mu_t,\\[2pt]
+\mathcal{D}=\mathrm{NB}(\mu_t,\kappa), & \mathrm{Var}(Y_t\mid\mathcal F_{t-1})=\mu_t\{1+\kappa\,\mu_t\}.
+\end{cases}
+$$
+
+$$
+\begin{aligned}
+\log \mu_t \;&=\; \omega \;+\; \alpha_1 Y_{t-1} \;+\; \alpha_2 Y_{t-2} \;+\; \beta_1 \mu_{t-1} \;+\; \beta_2 \mu_{t-2},
+\end{aligned}
+$$
+
+```{r tsglm-poisson-nb-1, echo=FALSE}
+fit_pois.1 <- tsglm(dat_train,
+   model = list(past_obs = c(1,2), past_mean = c(1,2)),
+   distr = "poisson", link = "log")
+fit_nb.1 <- tsglm(dat_train,
+   model = list(past_obs = c(1,2), past_mean = c(1,2)),
+   distr = "nbinom", link = "log")
+```
+
+To parallel the $SARIMA(2,0,2)(2,0,2)_{24}$ benchmark, I specified Poisson-INGARCH and NB-INGARCH models with lags at 1, 2, and 24 in the past observations and past means.
+
+$$
+\begin{aligned}
+\log \mu_t \;&=\; \omega \;+\; \alpha_1 Y_{t-1} \;+\; \alpha_2 Y_{t-2} \;+\; \alpha_{24} Y_{t-24} \\
+&\quad\;+\; \beta_1 \mu_{t-1} \;+\; \beta_2 \mu_{t-2} \;+\; \beta_{24} \mu_{t-24}.
+\end{aligned}
+$$
+
+```{r tsglm-poisson-nb-2, echo=FALSE}
+fit_pois.2 <- tsglm(dat_train,
+   model = list(past_obs = c(1,2,24), past_mean = c(1,2,24)),
+   distr = "poisson", link = "log")
+fit_nb.2 <- tsglm(dat_train,
+   model = list(past_obs = c(1,2,24), past_mean = c(1,2,24)),
+   distr = "nbinom", link = "log")
+```
+
+### Explicit Diurnal Pattern: Dummies vs. Smooth Cyclic Term
+
+While the INGARCH structure handles serial correlation, the exploratory analysis revealed a strong 24-hour cycle. I compare two approaches to model this:
+
+1.  **Hourly Dummies:** A saturated approach using 23 indicator variables ($h_t$). While flexible, this requires estimating 23 separate coefficients and assumes discontinuous jumps between hours.
+
+2.  **Cyclic Splines (GAM):** A Generalized Additive Model approach where the diurnal pattern is modeled by a smooth periodic function $f(H_t)$ [@wood2017generalized]. This captures the biological reality that activity changes gradually over time, while using fewer effective degrees of freedom than the dummy approach.
+
+\newpage
+
+**Hourly dummies**
+
+Let $\mathbf{h}_t \in \{0,1\}^{23}$ collect dummy indicators for hours $1,\dots,23$ (hour $0$ is the reference). I extend the INGARCH mean with these exogenous regressors: $$
+\log \mu_t \;=\; \omega 
+\;+\; \sum_{i=1}^{2}\alpha_i Y_{t-i}
+\;+\; \sum_{j=1}^{2}\beta_j \mu_{t-j}
+\;+\; \mathbf{h}_t^{\top}\gamma,
+$$where $\gamma\in\mathbb{R}^{23}$ captures the 24-point diurnal pattern.
+
+```{r, echo=FALSE}
+n <- length(dat_train)
+hour_idx <- (seq_len(n) - 1) %% 24
+X_hour   <- model.matrix(~ factor(hour_idx) - 1)
+```
+
+```{r hourly-dummies, echo=FALSE}
+fit_nb_hr <- tsglm(dat_train,
+   model = list(past_obs = c(1,2), past_mean = c(1,2)),
+   xreg  = X_hour, distr = "nbinom", link = "log")
+```
+
+**Smooth cyclic spline**
+
+Alternatively, I model the daily cycle by a smooth periodic function $f$:
+
+$$
+\log \mu_t \;=\; \omega 
+\;+\; \sum_{i=1}^{2}\alpha_i Y_{t-i}
+\;+\; f(H_t),
+$$
+
+with cyclic constraints ensuring diurnality,
+
+$$
+f(0)=f(24),\qquad f'(0)=f'(24),\qquad f''(0)=f''(24).
+$$
+
+```{r, echo=FALSE}
+ df <- data.frame(time = df_train$time,
+                  count = as.numeric(dat_train),
+                  hour  = (seq_along(dat_train) - 1) %% 24,
+                  lag1  = dplyr::lag(as.numeric(dat_train), 1),
+                  lag2  = dplyr::lag(as.numeric(dat_train), 2))
+ df <- stats::na.omit(df)
+```
+
+```{r gam-cyclic, echo=FALSE}
+ fit_gam <- gam(count ~ s(hour, bs = "cc") + lag1 + lag2,
+                family = nb(), data = df, method = "ML")
+```
+
+### Zero-Inflated Negative Binomial (ZINB)
+
+While the Negative Binomial GAM significantly improved fit by addressing overdispersion and non-linearity, it still assumes a single data-generating process. Under a standard NB framework, all zeros are considered "sampling zeros" — random occurrences where the count happened to be zero given the mean $\mu_t$. However, ecological data often arise from two distinct processes:
+
+**Structural Zeros**: The system is "off" (e.g., the animals are biologically inactive or outside the camera range), rendering a count of zero inevitable.
+
+**Count Process**: The system is "on" (the animals are active), but the count may be zero or positive depending on detection probability.
+
+\newpage
+Forcing a single NB distribution to account for this mixture can pull down the mean estimate for genuinely active periods, deflating the predicted magnitude of bursts. To resolve this, I employ a Zero-Inflated Negative Binomial (ZINB) model [@lambert1992zero].
+
+The ZINB model introduces a mixture probability $\pi$, representing the probability of the system being in the "structural zero" state. The probability mass function is defined as: $$P(Y_t = y | \mu_t, \kappa, \pi) = 
+\begin{cases} 
+\pi + (1 - \pi) \cdot P_{NB}(0 | \mu_t, \kappa) & \text{if } y = 0 \\
+(1 - \pi) \cdot P_{NB}(y | \mu_t, \kappa) & \text{if } y > 0 
+\end{cases}$$
+
+In the ZINB-GAM framework, implemented using the glmmTMB package [@brooks2017glmmtmb], I specify distinct predictor sets for each component to reflect the underlying biology. The count process ($\mu_t$) includes autoregressive terms ($Y_{t-1}, Y_{t-2}$) to capture the "burst" and serial dependence characteristic of active hunting periods. In contrast, the zero process ($\pi_t$) depends solely on the hour of the day. This design choice implies that the state of activity is governed primarily by the circadian rhythm, while the intensity of activity is driven by both time and recent activity level. $$\begin{aligned}
+\text{Count Process (log link):} \quad & \log(\mu_t) = \beta_0 + \beta_1 Y_{t-1} + \beta_2 Y_{t-2} + f_\mu(H_t) \\
+\text{Zero Process (logit link):} \quad & \text{logit}(\pi_t) = \gamma_0 + f_\pi(H_t)
+\end{aligned}$$
+
+```{r tmb, echo=FALSE}
+fit_zinb <- glmmTMB(count ~ lag1 + lag2 + s(hour, bs = "cc"),
+                    ziformula = ~ s(hour, bs = "cc"),
+                    family = nbinom2(link = "log"), data = df)
+```
+
+\newpage
+
+# Results
+
+In this section, I verify the statistical significance of the seasonal components, establish a hierarchy of model fit via information criteria, and examine the internal structure of the optimal Zero-Inflated Negative Binomial (ZINB) specification.
+
+## Verification of Seasonality (Likelihood Ratio Tests)
+
+To confirm that the observed "bursts" represent a structured diurnal cycle rather than random volatility, I performed Likelihood Ratio Tests (LRT) within the nested Negative Binomial INGARCH framework. I compared the baseline NB model against two extensions: one incorporating seasonal lags at $t-24$, and one incorporating 23 explicit dummy variables for the hour of the day.
+
+```{r, include=FALSE}
+lr_seasonal <- lrtest(fit_nb.1, fit_nb.2)       
+lr_dummies  <- lrtest(fit_nb.1, fit_nb_hr)     
+```
+
+```{r lrt-table, echo=FALSE}
+lrt_results <- data.frame(
+  Comparison = c(
+    "Baseline NB vs. NB + Seasonal Lags (24)",
+    "Baseline NB vs. NB + Hourly Dummies"
+  ),
+  Delta_LogLik = c(26.93, 62.20),
+  Delta_Df = c(2, 24),
+  Chi_Sq = c(53.87, 124.40),
+  P_Value = c("< 2e-12", "< 2e-15")
+)
+
+knitr::kable(
+  lrt_results, 
+  format = "latex",
+  digits = 2,
+  align = "lcccr",
+  col.names = c("Model Comparison", "$\\Delta$ LogLik", "$\\Delta$ Df", "$\\chi^2$ Stat", "P-Value"),
+  caption = "Likelihood Ratio Tests verifying the presence of seasonality.",
+  booktabs = TRUE,
+  escape = FALSE
+) %>%
+  kableExtra::kable_styling(
+      latex_options = c("striped", "hold_position"), 
+      position = "center",                          
+      full_width = FALSE
+  )
+```
+
+The results provide significant evidence that the diurnal cycle is a statistically significant driver of the data-generating process. The addition of hourly regressors yielded a massive improvement in fit ($\chi^2 = 124.40, p < 2e-15$), confirming that the added complexity of 24 additional degrees of freedom is justified by the data's structure.
+
+\newpage
+
+## Model Selection (AIC/BIC Comparison)
+
+Having established the necessity of seasonal terms, I compared the global fit of all candidate models using Akaike Information Criterion (AIC) and Bayesian Information Criterion (BIC).
+
+```{r, echo=FALSE}
+model_cmp <- data.frame(
+  Model = c("Poisson INGARCH(2,2)",
+            "NB INGARCH(2,2)",
+            "Poisson INGARCH(2,2) with Seasonality",
+            "NB INGARCH(2,2) with Seasonality",
+            "NB INGARCH(2,2) + Hour Dummies",
+            "NB INGARCH + Cyclic Spline",
+            "Zero Inflated NB + Cyclic Spline"),
+  AIC = c(AIC(fit_pois.1),
+          AIC(fit_nb.1),
+          AIC(fit_pois.2),
+          AIC(fit_nb.2),
+          AIC(fit_nb_hr),
+          AIC(fit_gam),
+          AIC(fit_zinb)),
+  BIC = c(BIC(fit_pois.1),
+          BIC(fit_nb.1),
+          BIC(fit_pois.2),
+          BIC(fit_nb.2),
+          BIC(fit_nb_hr),
+          BIC(fit_gam),
+          BIC(fit_zinb))
+) %>% arrange(AIC)
+knitr::kable(model_cmp, digits = 1, align = "c",
+             caption = "Model Fit Comparison (Sorted by AIC)",
+             booktabs = TRUE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE,
+                position = "center")
+```
+
+The model comparison demonstrates a clear hierarchy of fit. When modeling the dispersion, the Poisson model yielded an extremely poor fit (AIC $\approx$ 5550) due to its strict equidispersion assumption ($\text{Var} = \text{Mean}$). In contrast, the Negative Binomial model, which estimates an additional dispersion parameter $\kappa$, reduced the AIC to $\approx$ 1584. This massive improvement confirms that the overdispersion ($s^2 \gg \bar{x}$) is a structural feature of the data that must be explicitly modeled.
+
+Among the seasonal specifications, the GAM with cyclic splines (AIC: 1496.6) outperformed the Hourly Dummies model (AIC: 1508.1). This indicates that the diurnal pattern is best represented as a smooth continuum rather than discrete hourly steps.
+
+The Zero-Inflated Negative Binomial (ZINB) model achieved the lowest AIC (1264.5), outperforming the standard NB-GAM by over 230 points. This magnitude of improvement indicates that the data are generated by a dual-state process (structural absence vs. active counts) rather than a single continuous dispersion process.
+
+\newpage
+
+## Internal Structure of the ZINB Model
+
+The superior performance of the ZINB specification allows us to decompose the time series into its two latent components: the probability of structural absence (Zero Process) and the conditional expectation of activity (Count Process).
+
+### The Zero Process (Probability of Structural Absence)
+
+```{r, echo=F, out.width="80%", fig.pos="H", fig.cap="Estimated Probability of Structural Zero by Hour. The probability of absence is lowest during the night (indicating high activity) and approaches 1.0 during midday."}
+pred_data <- data.frame(hour = 0:23, lag1 = mean(df$lag1), lag2 = mean(df$lag2))
+pred_data$prob <- predict(fit_zinb, newdata = pred_data, type = "zprob")
+
+ggplot(pred_data, aes(x = hour, y = prob)) +
+  geom_line(color = "darkgreen", size = 1) +
+  geom_point(color = "darkgreen", size = 3) +
+  scale_x_continuous(breaks = seq(0, 23, by = 4)) +
+  labs(x = "Hour of Day",
+       y = "Probability") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+The model captures a clear biological pattern: the probability of absence is lowest during the night (indicating high coyote activity) and approaches 1.0 during midday, accurately reflecting the species' nocturnal behavior.
+
+\newpage
+
+### The Count Process (Fitted vs. Actual)
+
+Finally, I examine the conditional fitted values to verify the model's ability to replicate the magnitude of activity bursts.
+
+```{r plot_zinb_intervals, echo=FALSE, fig.pos="H", message=FALSE, warning=FALSE, fig.cap="ZINB Model Fit with Prediction Intervals. The red line represents the expected mean, while the shaded red ribbon represents the 95% prediction interval."}
+set.seed(123)
+simulations <- simulate(fit_zinb, nsim = 1000)
+sim_matrix <- as.matrix(simulations)
+
+plot_df <- data.frame(
+  Time = df$time,
+  Actual = df$count,
+  Fitted_Mean = predict(fit_zinb, type = "response"), 
+  Upper_95 = apply(sim_matrix, 1, quantile, probs = 0.95), 
+  Lower_95 = apply(sim_matrix, 1, quantile, probs = 0.05)
+)
+
+ggplot(plot_df, aes(x = Time)) +
+  geom_ribbon(aes(ymin = Lower_95, ymax = Upper_95, fill = "95% Prediction Interval"), 
+              alpha = 0.4) +
+  geom_line(aes(y = Actual, color = "Actual Count"), alpha = 0.6) +
+  geom_line(aes(y = Fitted_Mean, color = "Expected Mean"), size = 1) +
+  scale_color_manual(name = NULL, 
+                     values = c("Actual Count" = "black", "Expected Mean" = "red")) +
+  scale_fill_manual(name = NULL, 
+                    values = c("95% Prediction Interval" = "red")) +
+  labs(y = "Count", x = "Time") +
+  theme_minimal() +
+  theme(legend.position = "top",
+        plot.title = element_text(face = "bold"))
+```
+
+It is important to note that the expected mean remains considerably lower than the raw peaks. This is mathematically expected: because the data are zero-inflated and overdispersed, the average count at any given hour is pulled down by the probability of absence. However, the prediction interval extends upwards to cover the high-magnitude bursts. This confirms that the ZINB model has successfully estimated the dispersion parameter: it acknowledges that while the average night may be quiet, specific realizations can realistically spike to high levels. The fact that the observed bursts fall largely within this predicted envelope validates that the model correctly characterizes the data's generative bounds.
+
+\newpage
+
+## Out-of-Sample Validation (Forecast using ZINB model)
+
+To assess predictive power of the ZINB model, I performed an out-of-sample validation on the 24 hours immediately following the training period. Because standard point predictions cannot propagate autoregressive uncertainty through time, I employed a recursive Monte Carlo simulation ($N=1000$ iterations).
+
+```{r forecast_validation, echo=FALSE, message=FALSE, warning=FALSE, fig.pos="H", fig.cap="Out-of-Sample Forecast Verification. The model simulates 1,000 future paths to generate the 95% prediction interval. The actual observed data falls within this interval."}
+test_vals <- c(8, 5, 5, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 8, 8, 0)
+dat_test_24 <- test_vals[1:24]
+
+betas <- fixef(fit_zinb)$cond
+beta_lag1 <- betas["lag1"]
+beta_lag2 <- betas["lag2"]
+theta_est <- sigma(fit_zinb)
+last_obs <- tail(df, 2)
+next_hours <- (seq(last_obs$hour[2] + 1, length.out = 24)) %% 24
+
+base_data <- data.frame(hour = next_hours, lag1 = 0, lag2 = 0)
+base_link_mu <- predict(fit_zinb, newdata = base_data, type = "link", component = "cond")
+prob_zero_vec <- predict(fit_zinb, newdata = base_data, type = "zprob")
+
+nsim <- 1000
+n_hours <- 24
+sim_matrix <- matrix(NA, nrow = nsim, ncol = n_hours)
+current_lag1 <- rep(last_obs$count[2], nsim)
+current_lag2 <- rep(last_obs$count[1], nsim)
+
+set.seed(123)
+for (h in 1:n_hours) {
+  log_mu <- base_link_mu[h] + (beta_lag1 * current_lag1) + (beta_lag2 * current_lag2)
+  mu_vec <- exp(log_mu)
+  is_structural_zero <- rbinom(nsim, size = 1, prob = prob_zero_vec[h])
+  nb_draws <- rnbinom(nsim, mu = mu_vec, size = theta_est)
+  final_counts <- ifelse(is_structural_zero == 1, 0, nb_draws)
+  sim_matrix[, h] <- final_counts
+  current_lag2 <- current_lag1
+  current_lag1 <- final_counts
+}
+
+forecast_df <- data.frame(
+  Hour_Seq = 1:24,
+  Median = apply(sim_matrix, 2, median),
+  Lower_95 = apply(sim_matrix, 2, quantile, probs = 0.025),
+  Upper_95 = apply(sim_matrix, 2, quantile, probs = 0.975),
+  Mean = apply(sim_matrix, 2, mean),
+  Actual = dat_test_24
+)
+
+ggplot(forecast_df, aes(x = Hour_Seq)) +
+  geom_ribbon(aes(ymin = Lower_95, ymax = Upper_95, fill = "95% Prediction Interval"), alpha = 0.3) +
+  geom_line(aes(y = Mean, color = "Forecast Mean"), size = 1) +
+  geom_line(aes(y = Median, color = "Forecast Median"), size = 1, linetype = "dashed") +
+  geom_line(aes(y = Actual, color = "Actual Observed Data"), size = 1) +
+  geom_point(aes(y = Actual, color = "Actual Observed Data"), size = 2) +
+  scale_x_continuous(breaks = seq(0, 24, by = 4), limits = c(0, 24)) +
+  scale_fill_manual(values = "red", name = NULL) +
+  scale_color_manual(values = c("Forecast Mean" = "red", 
+                                "Forecast Median" = "blue", 
+                                "Actual Observed Data" = "black"), name = NULL) +
+  labs(x = "Hours Ahead", y = "Count") +
+  theme_minimal() +
+  theme(legend.position = "top")
+```
+
+The validation results confirm the model's robustness. The 95% prediction interval expands at the beginning and end of the cycle, successfully covering the observed counts. This validates that the model correctly identifies high-probability windows for activity without falsely predicting bursts during structural "off" periods.
+
+\newpage
+
+# Conclusion
+
+This analysis shows that for discrete, overdispersed ecological counts, Gaussian time-series models are fundamentally mis-specified, even with variance-stabilizing transformations. The SARIMA + Box–Cox baseline passed standard residual diagnostics but failed to represent the data-generating mechanism. The Box-Cox transformation ($\lambda \approx -1.2$) introduced a mathematical asymptote that rendered mean estimation numerically unstable, resulting in forecasts that underestimated biological activity bursts.
+
+In contrast, the transition to count-specific models offered a robust alternative. The improvement of model fit, from Poisson ($AIC \approx 5550$) to Negative Binomial ($AIC \approx 1584$), confirmed that overdispersion is a structural feature of the system.
+
+Ultimately, the Zero-Inflated Negative Binomial (ZINB) specification provided the superior fit ($AIC \approx 1264$) by explicitly modeling the ecological reality of the system. By decomposing the time series into a "structural zero" process and a "count" process, the model successfully distinguished between periods of biological absence and periods of high-intensity activity. This framework not only yields more accurate predictions but provides biologically interpretable inference that is obscured by standard time-series methods.
+
+# Discussion
+
+## Biological Implications of the Dual-State Process
+
+The superior fit of the Zero-Inflated Negative Binomial (ZINB) model supports a dual-state view of animal activity on the Gaviota Coast. A single Negative Binomial model struggles because it must use one dispersion parameter for both active hunting periods and inactive resting periods. By decoupling these processes, the ZINB model yields a clearer biological narrative. The "Zero Process" effectively maps the species' circadian rhythm, identifying a near-certainty of inactivity during midday hours. On the other hand, the "Count Process" captures the intensity of foraging during nocturnal hours. This separation suggests zero counts in ecological time series can carry information about behavioral inhibition and temporal niche partitioning, rather than being measurement noise [@martin2005zero].
+
+## The Risks of Gaussian Approximations in Ecology
+
+This analysis highlights the risks of applying Gaussian ARIMA models to count data, even when variance-stabilizing transformations are used. While the Box-Cox transformation successfully stabilized the variance ($\lambda \approx -1.2$), it introduced a severe interpretation cost. The non-linearity of the back-transformation creates a discrepancy between the forecast median and the forecast mean.
+
+Because the inverse transform is highly nonlinear and approaches an asymptote, there is no simple, stable way to map forecasts back to mean abundance on the original count scale. For conservation managers who care about the magnitude of activity bursts, such Gaussian approximations can therefore pass standard diagnostics yet still misrepresent the intensity of biologically important events, especially in systems with discrete, low-frequency bursts.
+
+## Limitations and Future Directions
+
+Several limitations in the current modeling framework warrant consideration. First, the data processing step implicitly treated gaps in the timestamp record as true absences rather than equipment failure. If camera malfunctions occurred non-randomly (e.g., overheating during midday), this would bias the ZINB model toward overestimating the structural-zero probability.
+
+Second, the model assumes a stationary diurnal cycle over the four-week period by using a single cyclic spline that is invariant across days. Future work could relax this assumption by allowing the diurnal pattern to vary over time or by incorporating external covariates—such as lunar phase, temperature, or tide height—to explain variation in the magnitude of nocturnal bursts in a long study.
+
+Finally, although the likelihood ratio tests confirmed the importance of diurnal structure and the cyclic spline provided a more parsimonious alternative to hourly dummy variables, the spline’s flexibility still requires careful control. Future analyses could systematically explore spline complexity (for example, effective degrees of freedom or knot placement) to balance model parsimony with the biological irregularities of animal movement.
+
+\newpage
+# References
